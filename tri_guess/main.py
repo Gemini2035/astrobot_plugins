@@ -35,7 +35,7 @@ except Exception:  # pragma: no cover - lets core tests import without AstrBot i
         return decorator
 
 
-@register("tri_guess", "nipz", "QQ 群三态竞猜记分小游戏", "1.0.12")
+@register("tri_guess", "nipz", "QQ 群三态竞猜记分小游戏", "1.0.13")
 class TriGuessPlugin(Star):
     def __init__(self, context: Any):
         super().__init__(context)
@@ -55,11 +55,11 @@ class TriGuessPlugin(Star):
         rest = rest.strip()
 
         if subcommand in {"", "help"}:
-            yield self._reply(event, self.service.help(), target_sender=True, quote=True)
+            yield self._reply(event, self.service.help(), quote=True)
             return
 
         if not self._is_group_event(event):
-            yield self._reply(event, "本功能仅支持群聊使用。", target_sender=True, quote=True)
+            yield self._reply(event, "本功能仅支持群聊使用。")
             return
 
         if subcommand in {"start", "start_guess"}:
@@ -75,7 +75,6 @@ class TriGuessPlugin(Star):
                     rest,
                     user_label=self._user_label(event),
                 ),
-                target_sender=True,
                 quote=True,
             )
             return
@@ -90,18 +89,18 @@ class TriGuessPlugin(Star):
             return
 
         if subcommand == "current":
-            yield self._reply(event, self.service.current(self._group_feature_id(event), self._user_id(event)), target_sender=True, quote=True)
+            yield self._reply(event, self.service.current(self._group_feature_id(event), self._user_id(event)), quote=True)
             return
 
         if subcommand == "score":
-            yield self._reply(event, self.service.score(self._group_feature_id(event), self._user_id(event)), target_sender=True, quote=True)
+            yield self._reply(event, self.service.score(self._group_feature_id(event), self._user_id(event)), quote=True)
             return
 
         if subcommand == "history":
-            yield self._reply(event, self.service.history(self._group_feature_id(event), self._user_id(event)), target_sender=True, quote=True)
+            yield self._reply(event, self.service.history(self._group_feature_id(event), self._user_id(event)), quote=True)
             return
 
-        yield self._reply(event, f"未知子命令，请使用 {command_usage('help')} 查看帮助。", target_sender=True, quote=True)
+        yield self._reply(event, f"未知子命令，请使用 {command_usage('help')} 查看帮助。")
 
     def _plain(self, event: Any, text: str) -> Any:
         plain_result = getattr(event, "plain_result", None)
