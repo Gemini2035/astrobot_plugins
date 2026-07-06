@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -16,6 +17,15 @@ RESULT_LABELS = {
     "win": "赢",
     "draw": "平",
     "lose": "输",
+}
+
+RESULT_ALIASES = {
+    "win": "win",
+    "赢": "win",
+    "draw": "draw",
+    "平": "draw",
+    "lose": "lose",
+    "输": "lose",
 }
 
 STATUS_LABELS = {
@@ -50,6 +60,7 @@ SENSITIVE_WORDS = (
     "庄家",
     "抽水",
 )
+MENTION_PATTERN = re.compile(r"\[\[tri_guess_at:([^|\]]+)\|([^\]]*)\]\]")
 
 
 @dataclass(frozen=True)
@@ -93,6 +104,20 @@ def fmt_decimal(value: Any) -> str:
 
 def contains_sensitive(text: str) -> bool:
     return any(word in text for word in SENSITIVE_WORDS)
+
+
+def normalize_result(value: str) -> str:
+    return RESULT_ALIASES.get(value.strip().lower(), "")
+
+
+def mention_token(user_id: str, label: str | None = None) -> str:
+    clean_user_id = str(user_id).replace("|", "_").replace("]", "_")
+    clean_label = str(label or user_id).replace("]", "_")
+    return f"[[tri_guess_at:{clean_user_id}|{clean_label}]]"
+
+
+def strip_mention_tokens(text: str) -> str:
+    return MENTION_PATTERN.sub(lambda match: f"@{match.group(2) or match.group(1)}", text)
 
 
 def split_command_args(raw: str, command: str) -> str:
@@ -154,7 +179,7 @@ class TriGuessService:
         current_time = at or now_local()
         title, options = extract_options(raw_args)
         if not title:
-            return "创建失败：请提供事件标题"
+            title = f"event_{current_time.strftime('%Y%m%d%H%M%S')}"
 
         category = options.get("category", self.config.default_category).lower()
         if category not in SUPPORTED_CATEGORIES:
@@ -208,33 +233,34 @@ class TriGuessService:
             f"标题：{title}\n"
             f"分类：{category}\n"
             f"参与截止：{self.config.default_bet_duration_minutes} 分钟后\n\n"
-            "可选结果：\n"
-            f"赢 {fmt_decimal(odds['win'])}\n"
-            f"平 {fmt_decimal(odds['draw'])}\n"
-            f"输 {fmt_decimal(odds['lose'])}\n\n"
-            "参与方式：\n"
-            f"{command_usage('bet', 'win', '30')}\n"
-            f"{command_usage('bet', 'draw', '10')}\n"
-            f"{command_usage('bet', 'lose', '50')}"
+            f"可选结果：赢/输/平，倍率 {fmt_decimal(odds['win'])}/{fmt_decimal(odds['lose'])}/{fmt_decimal(odds['draw'])}\n\n"
+            f"参与方式：{command_usage('bet', '赢/输/平', '你的下注')}（支持all快速投入当前全部点数）"
         )
 
-    def bet(self, group_id: str, user_id: str, raw_args: str, at: datetime | None = None) -> str:
+    def bet(self, group_id: str, user_id: str, raw_args: str, at: datetime | None = None, user_label: str | None = None) -> str:
         if contains_sensitive(raw_args):
             return SAFETY_MESSAGE
         current_time = at or now_local()
         parts = raw_args.split()
         if len(parts) != 2:
-            return f"竞猜失败：格式应为 {command_usage('bet', 'win', '30')}"
-        choice = parts[0].lower()
+            return f"竞猜失败：格式应为 {command_usage('bet', '赢', '30')}，也可用 all"
+        choice = normalize_result(parts[0])
         if choice not in SUPPORTED_RESULTS:
-            return "竞猜失败：结果只能是 win / draw / lose"
-        try:
-            input_score = parse_decimal(parts[1])
-        except ValueError:
-            return "竞猜失败：积分必须是有效数字"
-        stake = round_half_up(input_score)
-        if stake < self.config.min_stake:
-            return "竞猜失败：实际投入不能小于 1"
+            return "竞猜失败：结果只能是 赢 / 输 / 平"
+        stake_input = parts[1].strip()
+        is_all = stake_input.lower() == "all"
+        input_score: Decimal | str
+        if is_all:
+            input_score = "all"
+            stake = 0
+        else:
+            try:
+                input_score = parse_decimal(stake_input)
+            except ValueError:
+                return "竞猜失败：积分必须是有效数字或 all"
+            stake = round_half_up(input_score)
+            if stake < self.config.min_stake:
+                return "竞猜失败：实际投入不能小于 1"
 
         with self._lock, self._connect() as conn:
             self._run_due_tasks(conn, group_id, current_time)
@@ -248,10 +274,17 @@ class TriGuessService:
             if self._get_record(conn, int(event["id"]), user_id):
                 return "竞猜失败：你已参与当前事件，不能重复参与"
             score = self._ensure_score(conn, group_id, user_id, current_time)
-            if stake > int(score["available_score"]):
-                return "竞猜失败：你的当前可用积分不足"
+            available_score = int(score["available_score"])
+            balance_note = ""
+            if is_all:
+                stake = available_score
+            elif stake > available_score:
+                stake = available_score
+                balance_note = "当前可用积分不足，已按剩余全部积分投入。\n"
+            if stake < self.config.min_stake:
+                return "竞猜失败：你的当前可用积分不足，实际投入不能小于 1"
             odds = Decimal(str(event[f"odds_{choice}"]))
-            new_balance = int(score["available_score"]) - stake
+            new_balance = available_score - stake
             conn.execute(
                 """
                 UPDATE user_score
@@ -263,15 +296,16 @@ class TriGuessService:
             cursor = conn.execute(
                 """
                 INSERT INTO guess_record (
-                    event_id, group_id, user_id, score_date, choice, input_score, stake,
+                    event_id, group_id, user_id, user_label, score_date, choice, input_score, stake,
                     odds, status, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
                 """,
                 (
                     int(event["id"]),
                     group_id,
                     user_id,
+                    user_label or user_id,
                     current_time.date().isoformat(),
                     choice,
                     str(input_score),
@@ -283,24 +317,21 @@ class TriGuessService:
             self._log_score(conn, group_id, user_id, -stake, new_balance, "bet_stake", int(event["id"]), cursor.lastrowid, current_time)
 
         return (
-            "竞猜成功\n\n"
-            f"当前事件：{event['title']}\n"
-            f"分类：{event['category']}\n"
+            f"{balance_note}"
+            "竞猜成功\n"
             f"选择：{RESULT_LABELS[choice]}\n"
-            f"输入积分：{fmt_decimal(input_score)}\n"
             f"实际投入：{stake}\n"
-            f"倍数：{fmt_decimal(odds)}\n"
-            f"剩余积分：{new_balance}\n"
-            f"参与截止：{self._parse_dt(event['bet_close_at']).strftime('%H:%M')}"
+            f"倍率：{fmt_decimal(odds)}\n"
+            f"剩余积分：{new_balance}"
         )
 
     def settle(self, group_id: str, raw_args: str, at: datetime | None = None) -> str:
         if contains_sensitive(raw_args):
             return SAFETY_MESSAGE
         current_time = at or now_local()
-        result = raw_args.strip().lower()
+        result = normalize_result(raw_args)
         if result not in SUPPORTED_RESULTS:
-            return "结算失败：结果只能是 win / draw / lose"
+            return "结算失败：结果只能是 赢 / 输 / 平"
 
         with self._lock, self._connect() as conn:
             self._run_due_tasks(conn, group_id, current_time)
@@ -335,10 +366,8 @@ class TriGuessService:
                         (str(expected), actual, profit, self._dt(current_time), int(record["id"])),
                     )
                     self._log_score(conn, group_id, record["user_id"], actual, balance, "settle_win", int(event["id"]), int(record["id"]), current_time)
-                    hit_lines.append(
-                        f"@{record['user_id']} 投入 {stake}，倍数 {fmt_decimal(record['odds'])}，"
-                        f"应得 {fmt_decimal(expected)}，实得 {actual}，净收益 {profit:+d}"
-                    )
+                    label = record["user_label"] or record["user_id"]
+                    hit_lines.append(f"{mention_token(record['user_id'], label)} 赢 +{profit}（投入 {stake}，实得 {actual}）")
                 else:
                     score = self._ensure_score(conn, group_id, record["user_id"], current_time)
                     profit = -stake
@@ -361,7 +390,8 @@ class TriGuessService:
                         int(record["id"]),
                         current_time,
                     )
-                    miss_lines.append(f"@{record['user_id']} 投入 {stake}，实得 0，净收益 {profit:+d}")
+                    label = record["user_label"] or record["user_id"]
+                    miss_lines.append(f"{mention_token(record['user_id'], label)} 输 {profit}（投入 {stake}）")
             conn.execute(
                 """
                 UPDATE current_event
@@ -374,12 +404,9 @@ class TriGuessService:
         return (
             "当前事件已结算\n\n"
             f"标题：{event['title']}\n"
-            f"分类：{event['category']}\n"
             f"结果：{RESULT_LABELS[result]}\n\n"
-            "命中：\n"
-            f"{chr(10).join(hit_lines) if hit_lines else '无'}\n\n"
-            "未命中：\n"
-            f"{chr(10).join(miss_lines) if miss_lines else '无'}"
+            "输赢情况：\n"
+            f"{chr(10).join(hit_lines + miss_lines) if hit_lines or miss_lines else '无参与记录'}"
         )
 
     def cancel(self, group_id: str, at: datetime | None = None) -> str:
@@ -494,10 +521,9 @@ class TriGuessService:
             "创建当前事件，并设置分类和倍数。\n"
             "分类支持：apex / other。\n"
             "分类大小写不敏感。\n\n"
-            f"{command_usage('bet', 'win', '30')}\n"
-            f"{command_usage('bet', 'draw', '10.5')}\n"
-            f"{command_usage('bet', 'lose', '80')}\n"
-            "参与当前开放中的事件。输入积分会四舍五入，最多可投入当前全部可用积分。\n\n"
+            f"{command_usage('bet', '赢/输/平', '30')}\n"
+            f"{command_usage('bet', '赢', 'all')}\n"
+            "参与当前开放中的事件。输入积分会四舍五入，all 会投入当前全部可用积分。\n\n"
             f"{command_usage('current')}\n"
             "查看当前事件、分类、状态、倍数和自己的参与情况。\n\n"
             f"{command_usage('score')}\n"
@@ -507,9 +533,7 @@ class TriGuessService:
             f"{command_usage('help')}\n"
             "查看本帮助。\n\n"
             "结算与取消：\n"
-            f"{command_usage('settle', 'win')}\n"
-            f"{command_usage('settle', 'draw')}\n"
-            f"{command_usage('settle', 'lose')}\n"
+            f"{command_usage('settle', '赢/输/平')}\n"
             "结算当前事件。\n\n"
             f"{command_usage('cancel')}\n"
             "取消当前事件并退还已投入积分。"
@@ -562,6 +586,7 @@ class TriGuessService:
                     event_id INTEGER NOT NULL,
                     group_id TEXT NOT NULL,
                     user_id TEXT NOT NULL,
+                    user_label TEXT,
                     score_date TEXT NOT NULL,
                     choice TEXT NOT NULL,
                     input_score TEXT NOT NULL,
@@ -600,6 +625,15 @@ class TriGuessService:
                 );
                 """
             )
+            self._migrate_db(conn)
+
+    def _migrate_db(self, conn: sqlite3.Connection) -> None:
+        columns = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(guess_record)").fetchall()
+        }
+        if "user_label" not in columns:
+            conn.execute("ALTER TABLE guess_record ADD COLUMN user_label TEXT")
 
     def _ensure_score(self, conn: sqlite3.Connection, group_id: str, user_id: str, at: datetime) -> sqlite3.Row:
         row = conn.execute(

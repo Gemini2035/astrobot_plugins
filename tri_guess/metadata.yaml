@@ -1,5 +1,5 @@
 name: 学术氛围生成器
 desc: QQ 群三态竞猜记分小游戏。支持 win/draw/lose 三态选择、积分记分、每日补充、历史查询和安全边界拦截。
-version: v1.0.6
+version: v1.0.13
 author: Apodidae
 repo: ""

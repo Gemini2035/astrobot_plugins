@@ -6,12 +6,12 @@
 
 - `/guess start 标题`
 - `/guess start 标题 category=apex win=1.8 draw=3 lose=1.8`
-- `/guess bet win 30`
-- `/guess bet draw 10.5`
-- `/guess bet lose 80`
-- `/guess settle win`
-- `/guess settle draw`
-- `/guess settle lose`
+- `/guess bet 赢 30`
+- `/guess bet 输 all`
+- `/guess bet 平 10.5`
+- `/guess settle 赢`
+- `/guess settle 输`
+- `/guess settle 平`
 - `/guess cancel`
 - `/guess current`
 - `/guess score`
@@ -23,9 +23,9 @@
 - 每个群同一时间只能有一个 `open` 或 `closed` 事件。
 - 事件默认 5 分钟后停止参与，停止后等待结算或取消。
 - 分类支持 `apex` / `other`，大小写不敏感，默认 `other`。
-- 结果枚举为 `win` / `draw` / `lose`。
+- 结果枚举为 `赢` / `输` / `平`，同时兼容 `win` / `lose` / `draw`。
 - 用户首次使用获得 100 分。
-- 用户输入积分按四舍五入到整数处理，实际投入至少为 1。
+- 用户输入积分按四舍五入到整数处理，实际投入至少为 1；`all` 会快速投入当前全部点数。
 - 猜中时按 `实际投入 * 倍数` 计算应得，实得再次四舍五入为整数。
 - 每天 04:00 懒执行维护：取消未结束事件、退还 pending 记录、把低于 100 的用户补充到 100。
 - 不支持分数购买、兑换、转账或线下交易。
