@@ -53,43 +53,38 @@ jobs:
             exit 1
           fi
 
-          zip_name="${plugin_dir}.zip"
-
           echo "plugin_dir=$plugin_dir" >> "$GITHUB_OUTPUT"
-          echo "zip_name=$zip_name" >> "$GITHUB_OUTPUT"
-          echo "artifact_name=${plugin_dir}-zip" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=$plugin_dir" >> "$GITHUB_OUTPUT"
+          echo "artifact_path=dist/$plugin_dir" >> "$GITHUB_OUTPUT"
 
-      - name: Package zip
+      - name: Stage plugin artifact root
         shell: bash
         env:
           PLUGIN_DIR: ${{ steps.plugin.outputs.plugin_dir }}
-          ZIP_NAME: ${{ steps.plugin.outputs.zip_name }}
         run: |
           set -euo pipefail
-          mkdir -p dist
-          output_zip="$GITHUB_WORKSPACE/dist/$ZIP_NAME"
-          rm -f "$output_zip"
 
-          (
-            cd "$PLUGIN_DIR"
-            zip -r "$output_zip" . \
-              -x '*.DS_Store' \
-              -x '__MACOSX/*' \
-              -x '*/__MACOSX/*' \
-              -x '__pycache__/*' \
-              -x '*/__pycache__/*' \
-              -x '.pytest_cache/*' \
-              -x '*/.pytest_cache/*' \
-              -x '*.pyc' \
-              -x 'data/*' \
-              -x '*/data/*'
-          )
+          artifact_root="$GITHUB_WORKSPACE/dist/$PLUGIN_DIR"
+          rm -rf "$artifact_root"
+          mkdir -p "$artifact_root"
+          cp -R "$PLUGIN_DIR"/. "$artifact_root"/
 
-      - name: Upload browser-downloadable artifact
+          find "$artifact_root" -name '.DS_Store' -delete
+          find "$artifact_root" -name '*.pyc' -delete
+          find "$artifact_root" -type d \( \
+            -name '__MACOSX' -o \
+            -name '__pycache__' -o \
+            -name '.pytest_cache' -o \
+            -name 'data' \
+          \) -prune -exec rm -rf {} +
+
+          test -f "$artifact_root/metadata.yaml" || test -f "$artifact_root/metadata.yml"
+
+      - name: Upload browser-downloadable plugin zip
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.plugin.outputs.artifact_name }}
-          path: dist/${{ steps.plugin.outputs.zip_name }}
+          path: ${{ steps.plugin.outputs.artifact_path }}/**
           if-no-files-found: error
 
       - name: Write download summary
@@ -99,7 +94,7 @@ jobs:
           ## Plugin zip is ready
 
           Branch packaged: `${{ github.ref_name }}`
-          Zip filename: `${{ steps.plugin.outputs.zip_name }}`
+          Zip filename: `${{ steps.plugin.outputs.artifact_name }}.zip`
 
-          Download it from this workflow run's **Artifacts** section in your browser.
+          Download `${{ steps.plugin.outputs.artifact_name }}.zip` from this workflow run's **Artifacts** section in your browser, then upload that file directly to AstrBot.
           EOF
