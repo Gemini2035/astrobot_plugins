@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import re
 from pathlib import Path
 from typing import Any
 
@@ -93,12 +94,26 @@ class TriGuessPlugin(Star):
             return
 
         if subcommand == "score":
-            yield self._reply(event, self.service.score(self._group_feature_id(event), self._user_id(event)), quote=True)
+            target_user_id, target_label, error = self._target_user_from_args(event, rest)
+            if error:
+                yield self._reply(event, error, quote=True)
+                return
+            yield self._reply(
+                event,
+                self.service.score(
+                    self._group_feature_id(event),
+                    self._user_id(event),
+                    target_user_id=target_user_id,
+                    target_label=target_label,
+                ),
+                quote=True,
+            )
             return
 
-        if subcommand == "history":
-            yield self._reply(event, self.service.history(self._group_feature_id(event), self._user_id(event)), quote=True)
-            return
+        # History is temporarily disabled.
+        # if subcommand == "history":
+        #     yield self._reply(event, self.service.history(self._group_feature_id(event), self._user_id(event)), quote=True)
+        #     return
 
         yield self._reply(event, f"未知子命令，请使用 {command_usage('help')} 查看帮助。")
 
@@ -218,6 +233,28 @@ class TriGuessPlugin(Star):
     def _has_mention_token(self, text: str) -> bool:
         return MENTION_PATTERN.search(text) is not None
 
+    def _target_user_from_args(self, event: Any, raw_args: str) -> tuple[str | None, str | None, str]:
+        text = raw_args.strip()
+        if not text:
+            return None, None, ""
+
+        at_match = re.search(r"\[(?:At|at):([^\]]+)\]", text)
+        if at_match:
+            user_id = at_match.group(1).strip()
+            if user_id and user_id.lower() != "all":
+                return user_id, user_id, ""
+
+        cq_match = re.search(r"\[CQ:at,[^\]]*qq=([^,\]]+)", text, re.IGNORECASE)
+        if cq_match:
+            user_id = cq_match.group(1).strip()
+            if user_id and user_id.lower() != "all":
+                return user_id, user_id, ""
+
+        if text.isdigit():
+            return text, text, ""
+
+        return None, None, f"查询失败：格式应为 {command_usage('score')} 或 {command_usage('score', '@用户')}"
+
     def _qq_official_text(self, event: Any, text: str, target_sender: bool) -> str:
         parts: list[str] = []
         if target_sender:
@@ -270,6 +307,11 @@ class TriGuessPlugin(Star):
             value = func()
             if isinstance(value, str):
                 return value
+        raw = self._raw_message_object(event)
+        if raw is not None:
+            text = self._onebot_message_text(raw)
+            if text:
+                return text
         return ""
 
     def _is_explicitly_at_bot(self, event: Any) -> bool:
@@ -282,15 +324,22 @@ class TriGuessPlugin(Star):
                     continue
                 if result is not None:
                     return bool(result)
+        bot_id = self._bot_id(event)
         for text in self._raw_text_candidates(event):
-            if "[At:" in text or "[at:" in text.lower():
+            mentioned_ids = self._mentioned_user_ids_in_text(text)
+            if bot_id and bot_id in mentioned_ids:
+                return True
+            if not bot_id and mentioned_ids:
                 return True
         for component in self._message_components(event):
             name = component.__class__.__name__.lower()
-            if name == "at" or name.endswith(".at"):
-                return True
             ctype = getattr(component, "type", "")
-            if str(ctype).lower() == "at":
+            if name == "at" or name.endswith(".at") or str(ctype).lower() == "at":
+                mentioned_id = self._component_at_id(component)
+                if bot_id:
+                    if mentioned_id == bot_id:
+                        return True
+                    continue
                 return True
         return False
 
@@ -309,6 +358,11 @@ class TriGuessPlugin(Star):
                     continue
                 if isinstance(value, str):
                     candidates.append(value)
+        raw = self._raw_message_object(event)
+        if raw is not None:
+            text = self._onebot_message_text(raw)
+            if text:
+                candidates.append(text)
         return candidates
 
     def _message_components(self, event: Any) -> list[Any]:
@@ -440,6 +494,14 @@ class TriGuessPlugin(Star):
             )
             if value:
                 return value
+        raw = self._raw_message_object(event)
+        if raw is not None:
+            sender = self._object_value(raw, "sender")
+            if sender:
+                for key in ("card", "nickname", "name", "user_id"):
+                    value = self._object_value(sender, key)
+                    if value:
+                        return str(value)
         return self._user_id(event)
 
     def _first_event_value(self, event: Any, methods: tuple[str, ...], attrs: tuple[str, ...]) -> str:
@@ -456,6 +518,46 @@ class TriGuessPlugin(Star):
             value = getattr(event, attr, None)
             if value:
                 return str(value)
+        return ""
+
+    def _bot_id(self, event: Any) -> str:
+        value = self._first_event_value(
+            event,
+            methods=("get_self_id", "get_bot_id"),
+            attrs=("self_id", "bot_id"),
+        )
+        if value:
+            return value
+        raw = self._raw_message_object(event)
+        if raw is not None:
+            value = self._object_value(raw, "self_id")
+            if value:
+                return str(value)
+        message_obj = getattr(event, "message_obj", None)
+        if message_obj:
+            value = self._first_event_value(
+                message_obj,
+                methods=("get_self_id", "get_bot_id"),
+                attrs=("self_id", "bot_id"),
+            )
+            if value:
+                return value
+        return ""
+
+    def _mentioned_user_ids_in_text(self, text: str) -> set[str]:
+        return set(re.findall(r"\[(?:At|at):([^\]]+)\]", text))
+
+    def _component_at_id(self, component: Any) -> str:
+        for key in ("qq", "user_id", "id", "target"):
+            value = getattr(component, key, None)
+            if value:
+                return str(value)
+        data = getattr(component, "data", None)
+        if data:
+            for key in ("qq", "user_id", "id", "target"):
+                value = self._object_value(data, key)
+                if value:
+                    return str(value)
         return ""
 
     def _raw_message_object(self, event: Any) -> Any | None:
@@ -484,6 +586,13 @@ class TriGuessPlugin(Star):
         return value.strip().replace(":", "_").replace("/", "_") or "unknown"
 
     def _is_group_event(self, event: Any) -> bool:
+        if self._onebot_group_id(event):
+            return True
+        raw = self._raw_message_object(event)
+        if raw is not None:
+            message_type = self._object_value(raw, "message_type")
+            if str(message_type).lower() == "group":
+                return True
         for method in ("get_group_id",):
             func = getattr(event, method, None)
             if callable(func) and func():
@@ -509,4 +618,26 @@ class TriGuessPlugin(Star):
             value = self._object_value(raw, key)
             if value:
                 return str(value)
+        return ""
+
+    def _onebot_message_text(self, raw: Any) -> str:
+        for key in ("raw_message", "message_text", "message_str", "plain_text"):
+            value = self._object_value(raw, key)
+            if isinstance(value, str):
+                return value
+        message = self._object_value(raw, "message")
+        if isinstance(message, str):
+            return message
+        if isinstance(message, list):
+            return "".join(self._onebot_segment_text(segment) for segment in message)
+        return ""
+
+    def _onebot_segment_text(self, segment: Any) -> str:
+        segment_type = str(self._object_value(segment, "type") or "").lower()
+        data = self._object_value(segment, "data") or {}
+        if segment_type == "text":
+            return str(self._object_value(data, "text") or "")
+        if segment_type == "at":
+            qq = self._object_value(data, "qq")
+            return f"[At:{qq}]" if qq else ""
         return ""

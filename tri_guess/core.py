@@ -455,15 +455,33 @@ class TriGuessService:
             f"{bet_info}"
         )
 
-    def score(self, group_id: str, user_id: str, at: datetime | None = None) -> str:
+    def score(
+        self,
+        group_id: str,
+        user_id: str,
+        at: datetime | None = None,
+        target_user_id: str | None = None,
+        target_label: str | None = None,
+    ) -> str:
         current_time = at or now_local()
+        score_user_id = target_user_id or user_id
         with self._lock, self._connect() as conn:
             self._run_due_tasks(conn, group_id, current_time)
-            score = self._ensure_score(conn, group_id, user_id, current_time)
+            if score_user_id == user_id:
+                score = self._ensure_score(conn, group_id, score_user_id, current_time)
+            else:
+                score = conn.execute(
+                    "SELECT * FROM user_score WHERE group_id = ? AND user_id = ?",
+                    (group_id, score_user_id),
+                ).fetchone()
+                if not score:
+                    label = target_label or score_user_id
+                    return f"{label} 暂无积分记录，首次使用会获得 {self.config.default_score} 分。"
         next_time = self._next_supplement_time(current_time)
         next_label = "今日 04:00" if next_time.date() == current_time.date() else "明日 04:00"
+        owner = "你的" if score_user_id == user_id else f"{target_label or score_user_id} 的"
         return (
-            f"你的当前可用积分：{score['available_score']}\n"
+            f"{owner}当前可用积分：{score['available_score']}\n"
             f"每日基础分：{self.config.default_score}\n"
             f"下次补充时间：{next_label}\n\n"
             f"说明：低于 {self.config.default_score} 时会补充到 {self.config.default_score}，"
@@ -527,9 +545,11 @@ class TriGuessService:
             f"{command_usage('current')}\n"
             "查看当前事件、分类、状态、倍数和自己的参与情况。\n\n"
             f"{command_usage('score')}\n"
-            "查看当前可用积分和每日 04:00 补充规则。\n\n"
-            f"{command_usage('history')}\n"
-            "查看最近参与记录。\n\n"
+            f"{command_usage('score', '@用户')}\n"
+            "查看自己或指定用户的当前可用积分和每日 04:00 补充规则。\n\n"
+            # History is temporarily hidden from help while the command is disabled.
+            # f"{command_usage('history')}\n"
+            # "查看最近参与记录。\n\n"
             f"{command_usage('help')}\n"
             "查看本帮助。\n\n"
             "结算与取消：\n"
