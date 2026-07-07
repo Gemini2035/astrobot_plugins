@@ -40,9 +40,18 @@ fi
 
 rm -f "$output_zip"
 
+case "$output_zip" in
+  /*)
+    zip_target=$output_zip
+    ;;
+  *)
+    zip_target=../$output_zip
+    ;;
+esac
+
 (
   cd "$plugin_dir"
-  zip -r "../$output_zip" . \
+  zip -r "$zip_target" . \
     -x '*.DS_Store' \
     -x '__MACOSX/*' \
     -x '*/__MACOSX/*' \
