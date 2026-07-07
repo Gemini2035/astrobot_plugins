@@ -4,40 +4,34 @@ on:
   workflow_dispatch:
     inputs:
       plugin_dir:
-        description: "First-level plugin folder to package, for example: tri_guess"
+        description: "First-level plugin folder to package"
         required: true
         default: "tri_guess"
-        type: string
-      zip_name:
-        description: "Optional output zip filename, for example: tri_guess.zip"
-        required: false
-        type: string
+        type: choice
+        options:
+          - tri_guess
 
 permissions:
   contents: read
 
 jobs:
   package:
-    name: Package plugin from production
+    name: Package selected plugin
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout production branch
+      - name: Checkout selected branch
         uses: actions/checkout@v4
-        with:
-          ref: production
 
       - name: Validate plugin folder
         id: plugin
         shell: bash
         env:
           INPUT_PLUGIN_DIR: ${{ inputs.plugin_dir }}
-          INPUT_ZIP_NAME: ${{ inputs.zip_name }}
         run: |
           set -euo pipefail
 
           plugin_dir="$INPUT_PLUGIN_DIR"
-          zip_name="$INPUT_ZIP_NAME"
 
           case "$plugin_dir" in
             ""|.*|/*|*..*|*/*)
@@ -47,7 +41,7 @@ jobs:
           esac
 
           if [ ! -d "$plugin_dir" ]; then
-            echo "Plugin directory not found on production branch: $plugin_dir" >&2
+            echo "Plugin directory not found on selected branch: $plugin_dir" >&2
             echo "Available first-level plugin folders:" >&2
             find . -maxdepth 2 -mindepth 2 \( -name metadata.yaml -o -name metadata.yml \) \
               -printf '%h\n' | sed 's#^\./##' | sort >&2
@@ -59,21 +53,7 @@ jobs:
             exit 1
           fi
 
-          if [ -z "$zip_name" ]; then
-            zip_name="${plugin_dir}.zip"
-          fi
-
-          case "$zip_name" in
-            ""|.*|/*|*..*|*/*|*.zip.zip)
-              echo "zip_name must be a plain filename ending in .zip, for example: ${plugin_dir}.zip" >&2
-              exit 2
-              ;;
-            *.zip)
-              ;;
-            *)
-              zip_name="${zip_name}.zip"
-              ;;
-          esac
+          zip_name="${plugin_dir}.zip"
 
           echo "plugin_dir=$plugin_dir" >> "$GITHUB_OUTPUT"
           echo "zip_name=$zip_name" >> "$GITHUB_OUTPUT"
@@ -86,7 +66,24 @@ jobs:
           ZIP_NAME: ${{ steps.plugin.outputs.zip_name }}
         run: |
           set -euo pipefail
-          ./package_plugin.sh "$PLUGIN_DIR" "dist/$ZIP_NAME"
+          mkdir -p dist
+          output_zip="$GITHUB_WORKSPACE/dist/$ZIP_NAME"
+          rm -f "$output_zip"
+
+          (
+            cd "$PLUGIN_DIR"
+            zip -r "$output_zip" . \
+              -x '*.DS_Store' \
+              -x '__MACOSX/*' \
+              -x '*/__MACOSX/*' \
+              -x '__pycache__/*' \
+              -x '*/__pycache__/*' \
+              -x '.pytest_cache/*' \
+              -x '*/.pytest_cache/*' \
+              -x '*.pyc' \
+              -x 'data/*' \
+              -x '*/data/*'
+          )
 
       - name: Upload browser-downloadable artifact
         uses: actions/upload-artifact@v4
@@ -101,7 +98,8 @@ jobs:
           cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
           ## Plugin zip is ready
 
-          Branch packaged: `production`
+          Branch packaged: `${{ github.ref_name }}`
+          Zip filename: `${{ steps.plugin.outputs.zip_name }}`
 
           Download it from this workflow run's **Artifacts** section in your browser.
           EOF
